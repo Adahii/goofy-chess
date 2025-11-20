@@ -12,9 +12,6 @@ GameMode = str  # "classic","spy","absorption"
 
 BOARD_SIZE = 8
 
-# Global in-memory room store (shared across users on same server)
-ROOMS: Dict[str, "GameState"] = {}
-
 
 @dataclass
 class Piece:
@@ -43,7 +40,16 @@ class GameState:
     move_history: List[str] = field(default_factory=list)
 
 
-# ---------- Utility helpers ----------
+# ---------- Shared room store (instead of plain global) ----------
+
+@st.cache_resource
+def get_room_store() -> Dict[str, GameState]:
+    """
+    Cached dict of room_code -> GameState.
+    Persists across reruns and sessions in the same server process.
+    """
+    return {}
+
 
 def generate_room_code() -> str:
     return "".join(random.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789") for _ in range(5))
@@ -273,15 +279,17 @@ def generate_legal_moves_for_piece(game: GameState, piece: Piece, current_player
 # ---------- Game Mechanics ----------
 
 def get_game(room_code: str) -> Optional[GameState]:
-    return ROOMS.get(room_code)
+    rooms = get_room_store()
+    return rooms.get(room_code)
 
 
 def create_game(room_code: str, mode: GameMode) -> GameState:
+    rooms = get_room_store()
     board = create_starting_board()
     game = GameState(room_code=room_code, mode=mode, board=board)
     if mode == "spy":
         assign_spies(game)
-    ROOMS[room_code] = game
+    rooms[room_code] = game
     return game
 
 
@@ -365,7 +373,7 @@ def make_move(game: GameState,
     return True, "Move played."
 
 
-# ---------- Streamlit State & Setup ----------
+# ---------- Streamlit State & CSS ----------
 
 def init_session():
     if "player_id" not in st.session_state:
@@ -383,16 +391,9 @@ def init_session():
 
 
 def inject_board_css():
-    # Chess.com-ish theme (green + beige), square sizing, highlights
     st.markdown(
         """
 <style>
-/* Make the main page darkish and centered */
-.main > div {
-    padding-top: 1rem;
-}
-
-/* Style all board buttons to be square-ish */
 div[data-testid="stButton"] > button {
     width: 64px;
     height: 64px;
@@ -402,28 +403,20 @@ div[data-testid="stButton"] > button {
     font-size: 36px;
     line-height: 1;
 }
-
-/* Light & dark squares using CSS variables + classes on wrapper divs */
 .chess-square-light > div[data-testid="stButton"] > button {
-    background-color: #EEEED2;  /* light beige */
+    background-color: #EEEED2;
     color: #000000;
 }
 .chess-square-dark > div[data-testid="stButton"] > button {
-    background-color: #769656;  /* green */
+    background-color: #769656;
     color: #000000;
 }
-
-/* Selected square outline */
 .chess-square-selected > div[data-testid="stButton"] > button {
     box-shadow: 0 0 0 3px #f6f669 inset;
 }
-
-/* Legal moves highlight (soft ring) */
 .chess-square-legal > div[data-testid="stButton"] > button {
     box-shadow: 0 0 0 3px rgba(255, 255, 0, 0.4) inset;
 }
-
-/* Coordinates row/col labels */
 .chess-coord {
     font-size: 14px;
     text-align: center;
@@ -471,10 +464,11 @@ def host_or_join_ui():
         preferred = st.sidebar.radio("Preferred color", ["Auto", "White", "Black"])
 
         if st.sidebar.button("Join room"):
-            if room_code_input not in ROOMS:
-                st.session_state["last_message"] = "Room not found."
+            rooms = get_room_store()
+            if room_code_input not in rooms:
+                st.session_state["last_message"] = "Room not found. Make sure the host is running the app and gave you the right code."
             else:
-                game = ROOMS[room_code_input]
+                game = rooms[room_code_input]
                 # Assign color
                 if preferred == "White":
                     try_color_order = ["white", "black"]
@@ -505,11 +499,15 @@ def host_or_join_ui():
 def render_game_ui():
     room_code = st.session_state["room_code"]
     player_color = st.session_state["player_color"]
-    if not room_code or room_code not in ROOMS:
+
+    if not room_code:
         st.write("Create or join a game from the sidebar.")
         return
 
-    game = ROOMS[room_code]
+    game = get_game(room_code)
+    if game is None:
+        st.warning("This room no longer exists (server restarted or room expired). Create a new room.")
+        return
 
     st.subheader(f"Room: `{room_code}`  |  Mode: {game.mode.capitalize()}")
 
@@ -587,7 +585,6 @@ def render_game_ui():
                 square_classes.append("chess-square-legal")
 
             wrapper = row_cols[c + 1].container()
-            # Apply CSS class wrapper around the button
             wrapper.markdown(
                 f"<div class=\"{' '.join(square_classes)}\">",
                 unsafe_allow_html=True,
@@ -663,7 +660,6 @@ def handle_square_click(game: GameState, rc: Tuple[int, int], player_color: Colo
             return
 
         st.session_state["selected_square"] = (r, c)
-        # Pre-compute legal moves for highlight
         st.session_state["legal_moves"] = generate_legal_moves_for_piece(game, piece, player_color)
         st.session_state["last_message"] = f"Selected {piece.type} on {square_name(r, c)}."
         return
