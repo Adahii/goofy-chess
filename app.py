@@ -365,7 +365,7 @@ def make_move(game: GameState,
     return True, "Move played."
 
 
-# ---------- Streamlit UI ----------
+# ---------- Streamlit State & Setup ----------
 
 def init_session():
     if "player_id" not in st.session_state:
@@ -376,9 +376,67 @@ def init_session():
         st.session_state["player_color"] = None
     if "selected_square" not in st.session_state:
         st.session_state["selected_square"] = None
+    if "legal_moves" not in st.session_state:
+        st.session_state["legal_moves"] = []  # list of (r,c)
     if "last_message" not in st.session_state:
         st.session_state["last_message"] = ""
 
+
+def inject_board_css():
+    # Chess.com-ish theme (green + beige), square sizing, highlights
+    st.markdown(
+        """
+<style>
+/* Make the main page darkish and centered */
+.main > div {
+    padding-top: 1rem;
+}
+
+/* Style all board buttons to be square-ish */
+div[data-testid="stButton"] > button {
+    width: 64px;
+    height: 64px;
+    padding: 0;
+    border-radius: 0;
+    border: none;
+    font-size: 36px;
+    line-height: 1;
+}
+
+/* Light & dark squares using CSS variables + classes on wrapper divs */
+.chess-square-light > div[data-testid="stButton"] > button {
+    background-color: #EEEED2;  /* light beige */
+    color: #000000;
+}
+.chess-square-dark > div[data-testid="stButton"] > button {
+    background-color: #769656;  /* green */
+    color: #000000;
+}
+
+/* Selected square outline */
+.chess-square-selected > div[data-testid="stButton"] > button {
+    box-shadow: 0 0 0 3px #f6f669 inset;
+}
+
+/* Legal moves highlight (soft ring) */
+.chess-square-legal > div[data-testid="stButton"] > button {
+    box-shadow: 0 0 0 3px rgba(255, 255, 0, 0.4) inset;
+}
+
+/* Coordinates row/col labels */
+.chess-coord {
+    font-size: 14px;
+    text-align: center;
+    color: #9ca3af;
+    margin-top: 0.2rem;
+}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ---------- Host / Join UI ----------
 
 def host_or_join_ui():
     st.sidebar.header("🎮 Game Setup")
@@ -405,7 +463,8 @@ def host_or_join_ui():
             st.session_state["room_code"] = room_code
             st.session_state["player_color"] = host_color
             st.session_state["selected_square"] = None
-            st.session_state["last_message"] = "Room created. Share code with your friend."
+            st.session_state["legal_moves"] = []
+            st.session_state["last_message"] = "Room created. Share the code with your friend."
 
     else:  # Join game
         room_code_input = st.sidebar.text_input("Room code", max_chars=5).upper()
@@ -437,8 +496,11 @@ def host_or_join_ui():
                     st.session_state["room_code"] = room_code_input
                     st.session_state["player_color"] = assigned
                     st.session_state["selected_square"] = None
+                    st.session_state["legal_moves"] = []
                     st.session_state["last_message"] = f"Joined as {assigned}."
 
+
+# ---------- Board Rendering & Interaction ----------
 
 def render_game_ui():
     room_code = st.session_state["room_code"]
@@ -470,7 +532,7 @@ def render_game_ui():
     # Variant hints
     if game.mode == "spy":
         st.info("Spy mode: one of your opponent's pieces secretly belongs to you.\n"
-                "You can move your own pieces normally. If you move your hidden spy, it flips to your color.")
+                "Click your pieces to move. If you click your hidden spy (shown only to you below), it flips to your color.")
     elif game.mode == "absorption":
         st.info("Absorption mode: when a piece captures a *different* piece type, it permanently gains that movement ability.")
 
@@ -483,7 +545,7 @@ def render_game_ui():
                 if p and p.is_spy and p.true_owner == player_color:
                     spy_squares.append(square_name(r, c))
         if spy_squares:
-            st.markdown(f"🕵️ Your hidden spy is currently at: `{', '.join(spy_squares)}`")
+            st.markdown(f"🕵️ Your hidden spy is at: `{', '.join(spy_squares)}`")
         else:
             st.markdown("🕵️ You currently have **no active spy** (or it has already been revealed / captured).")
 
@@ -491,27 +553,52 @@ def render_game_ui():
 
     st.divider()
 
-    # Board
     selected = st.session_state["selected_square"]
+    legal_moves = st.session_state["legal_moves"]
     board = game.board
 
-    # Render from White's perspective: row 0 at top is rank 8
+    # Board coordinates (files a–h)
+    files_row = st.columns(9)
+    files_row[0].markdown(" ")
+    for c in range(BOARD_SIZE):
+        files_row[c + 1].markdown(f"<div class='chess-coord'>{'abcdefgh'[c]}</div>", unsafe_allow_html=True)
+
+    # Render 8 ranks (top rank 8 at row=0)
     for r in range(BOARD_SIZE):
-        cols = st.columns(BOARD_SIZE)
+        row_cols = st.columns(9)
+        # Rank label
+        row_cols[0].markdown(
+            f"<div class='chess-coord'>{8 - r}</div>",
+            unsafe_allow_html=True,
+        )
         for c in range(BOARD_SIZE):
             piece = board[r][c]
             label = piece_symbol(piece) if piece else " "
-            square = square_name(r, c)
+            is_selected = selected == (r, c)
+            is_legal = (r, c) in legal_moves
 
-            # Highlight style: crude via label
-            display_label = label
-            if selected == (r, c):
-                display_label = f"[{label}]"
+            # Square color (like chess.com)
+            is_dark = (r + c) % 2 == 1
+            square_classes = []
+            square_classes.append("chess-square-dark" if is_dark else "chess-square-light")
+            if is_selected:
+                square_classes.append("chess-square-selected")
+            if is_legal:
+                square_classes.append("chess-square-legal")
+
+            wrapper = row_cols[c + 1].container()
+            # Apply CSS class wrapper around the button
+            wrapper.markdown(
+                f"<div class=\"{' '.join(square_classes)}\">",
+                unsafe_allow_html=True,
+            )
 
             btn_key = f"square-{r}-{c}-{room_code}"
-            if cols[c].button(display_label, key=btn_key):
+            if wrapper.button(label, key=btn_key):
                 handle_square_click(game, (r, c), player_color)
                 st.experimental_rerun()
+
+            wrapper.markdown("</div>", unsafe_allow_html=True)
 
     # Move log
     st.divider()
@@ -531,6 +618,7 @@ def render_game_ui():
     with col_a:
         if st.button("Reset selection"):
             st.session_state["selected_square"] = None
+            st.session_state["legal_moves"] = []
             st.session_state["last_message"] = ""
             st.experimental_rerun()
     with col_b:
@@ -538,6 +626,7 @@ def render_game_ui():
             st.session_state["room_code"] = None
             st.session_state["player_color"] = None
             st.session_state["selected_square"] = None
+            st.session_state["legal_moves"] = []
             st.session_state["last_message"] = "Left the room."
             st.experimental_rerun()
     with col_c:
@@ -559,7 +648,7 @@ def handle_square_click(game: GameState, rc: Tuple[int, int], player_color: Colo
     # First click: select a piece
     if selected is None:
         if piece is None:
-            st.session_state["last_message"] = "Click on one of your pieces to move."
+            st.session_state["last_message"] = "Click one of your pieces to move."
             return
 
         # You can select your own pieces; in Spy mode, you may also select your spy on opponent's side
@@ -574,6 +663,8 @@ def handle_square_click(game: GameState, rc: Tuple[int, int], player_color: Colo
             return
 
         st.session_state["selected_square"] = (r, c)
+        # Pre-compute legal moves for highlight
+        st.session_state["legal_moves"] = generate_legal_moves_for_piece(game, piece, player_color)
         st.session_state["last_message"] = f"Selected {piece.type} on {square_name(r, c)}."
         return
 
@@ -582,16 +673,21 @@ def handle_square_click(game: GameState, rc: Tuple[int, int], player_color: Colo
     if (fr, fc) == (r, c):
         # Deselect
         st.session_state["selected_square"] = None
+        st.session_state["legal_moves"] = []
         st.session_state["last_message"] = "Selection cleared."
         return
 
     success, msg = make_move(game, (fr, fc), (r, c), player_color)
     st.session_state["selected_square"] = None
+    st.session_state["legal_moves"] = []
     st.session_state["last_message"] = msg
 
 
+# ---------- Main ----------
+
 def main():
     st.set_page_config(page_title="Variant Chess – Spy & Absorption", layout="wide")
+    inject_board_css()
     st.title("♟ Variant Chess – Spy & Absorption (Multiplayer)")
     init_session()
     host_or_join_ui()
